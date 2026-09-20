@@ -1,0 +1,205 @@
+diff --git a/driver/armchina-npu/aipu.c b/driver/armchina-npu/aipu.c
+index 54c8efb..a5d56be 100644
+--- a/driver/armchina-npu/aipu.c
++++ b/driver/armchina-npu/aipu.c
+@@ -77,6 +77,156 @@ static int aipu_release(struct inode *inode, struct file *filp)
+ 	return 0;
+ }
+ 
++/*
++ * Legacy UMD ABI compatibility (opt-in).
++ *
++ * cix-noe-umd 2.0.2 and older were built against the kernel-6.6 struct
++ * layouts: aipu_buf_request had no exec_id/reserve_iova_size/alloc_mode,
++ * aipu_buf_desc had no exec_id, and aipu_job_desc had no asid0_base.
++ * Because the ioctl command number encodes the struct size, those UMDs emit
++ * different command numbers. Accept them as separate cases and translate.
++ */
++
++struct aipu_buf_desc_v0 {
++	__u64 pa;
++	__u64 dev_offset;
++	__u64 bytes;
++	__u8  region;
++	__u8  asid;
++};
++
++struct aipu_buf_request_v0 {
++	__u64 bytes;
++	__u32 align_in_page;
++	__u32 data_type;
++	__u8  region;
++	__u8  asid;
++	struct aipu_buf_desc_v0 desc;
++};
++
++struct aipu_job_desc_v0 {
++	__u32 is_defer_run;
++	__u32 version_compatible;
++	__u32 core_id;
++	__u32 partition_id;
++	__u32 do_trigger;
++	__u32 aipu_arch;
++	__u32 aipu_version;
++	__u32 aipu_config;
++	__u32 start_pc_addr;
++	__u32 intr_handler_addr;
++	__u32 data_0_addr;
++	__u32 data_1_addr;
++	__u64 job_id;
++	__u32 enable_prof;
++	__s64 profile_fd;
++	__u64 profile_pa;
++	__u32 profile_sz;
++	__u32 enable_poll_opt;
++	__u32 exec_flag;
++	__u32 dtcm_size_kb;
++	__u64 head_tcb_pa;
++	__u64 first_task_tcb_pa;
++	__u64 last_task_tcb_pa;
++	__u64 tail_tcb_pa;
++	__u32 is_coredump_en;
++};
++
++#define AIPU_IOCTL_REQ_BUF_V0	    _IOWR(AIPU_IOCTL_MAGIC, 2, struct aipu_buf_request_v0)
++#define AIPU_IOCTL_FREE_BUF_V0	    _IOW(AIPU_IOCTL_MAGIC, 3, struct aipu_buf_desc_v0)
++#define AIPU_IOCTL_SCHEDULE_JOB_V0  _IOW(AIPU_IOCTL_MAGIC, 6, struct aipu_job_desc_v0)
++
++static int copy_buf_request_from_v0(struct aipu_buf_request *dst, const void __user *uarg)
++{
++	struct aipu_buf_request_v0 v0;
++
++	if (copy_from_user(&v0, uarg, sizeof(v0)))
++		return -EFAULT;
++
++	memset(dst, 0, sizeof(*dst));
++	dst->bytes	   = v0.bytes;
++	dst->align_in_page = v0.align_in_page;
++	dst->data_type	   = v0.data_type;
++	dst->region	   = v0.region;
++	dst->asid	   = v0.asid;
++	dst->alloc_mode	   = AIPU_DMA_BUF_MALLOC_DEFAULT;
++	dst->exec_id	   = 0;
++	return 0;
++}
++
++static int copy_buf_request_to_v0(void __user *uarg, const struct aipu_buf_request *src)
++{
++	struct aipu_buf_request_v0 v0;
++
++	memset(&v0, 0, sizeof(v0));
++	v0.bytes	   = src->bytes;
++	v0.align_in_page   = src->align_in_page;
++	v0.data_type	   = src->data_type;
++	v0.region	   = src->region;
++	v0.asid		   = src->asid;
++	v0.desc.pa	   = src->desc.pa;
++	v0.desc.dev_offset = src->desc.dev_offset;
++	v0.desc.bytes	   = src->desc.bytes;
++	v0.desc.region	   = src->desc.region;
++	v0.desc.asid	   = src->desc.asid;
++
++	if (copy_to_user(uarg, &v0, sizeof(v0)))
++		return -EFAULT;
++	return 0;
++}
++
++static int copy_buf_desc_from_v0(struct aipu_buf_desc *dst, const void __user *uarg)
++{
++	struct aipu_buf_desc_v0 v0;
++
++	if (copy_from_user(&v0, uarg, sizeof(v0)))
++		return -EFAULT;
++
++	memset(dst, 0, sizeof(*dst));
++	dst->pa		= v0.pa;
++	dst->dev_offset = v0.dev_offset;
++	dst->bytes	= v0.bytes;
++	dst->region	= v0.region;
++	dst->asid	= v0.asid;
++	return 0;
++}
++
++static int copy_job_desc_from_v0(struct aipu_job_desc *dst, const void __user *uarg)
++{
++	struct aipu_job_desc_v0 v0;
++
++	if (copy_from_user(&v0, uarg, sizeof(v0)))
++		return -EFAULT;
++
++	memset(dst, 0, sizeof(*dst));
++	dst->is_defer_run	= v0.is_defer_run;
++	dst->version_compatible	= v0.version_compatible;
++	dst->core_id		= v0.core_id;
++	dst->partition_id	= v0.partition_id;
++	dst->do_trigger		= v0.do_trigger;
++	dst->aipu_arch		= v0.aipu_arch;
++	dst->aipu_version	= v0.aipu_version;
++	dst->aipu_config	= v0.aipu_config;
++	dst->start_pc_addr	= v0.start_pc_addr;
++	dst->intr_handler_addr	= v0.intr_handler_addr;
++	dst->data_0_addr	= v0.data_0_addr;
++	dst->data_1_addr	= v0.data_1_addr;
++	dst->job_id		= v0.job_id;
++	dst->enable_prof	= v0.enable_prof;
++	dst->profile_fd		= v0.profile_fd;
++	dst->profile_pa		= v0.profile_pa;
++	dst->profile_sz		= v0.profile_sz;
++	dst->enable_poll_opt	= v0.enable_poll_opt;
++	dst->exec_flag		= v0.exec_flag;
++	dst->dtcm_size_kb	= v0.dtcm_size_kb;
++	dst->head_tcb_pa	= v0.head_tcb_pa;
++	dst->first_task_tcb_pa	= v0.first_task_tcb_pa;
++	dst->last_task_tcb_pa	= v0.last_task_tcb_pa;
++	dst->tail_tcb_pa	= v0.tail_tcb_pa;
++	dst->is_coredump_en	= v0.is_coredump_en;
++	return 0;
++}
++
+ static long aipu_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+ {
+ 	int ret = 0;
+@@ -105,6 +255,29 @@ static long aipu_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+ 	struct aipu_bind_buf_desc bind_buf;
+ 
+ 	switch (cmd) {
++	case AIPU_IOCTL_REQ_BUF_V0:
++		if (!copy_buf_request_from_v0(&buf_req, (void __user *)arg)) {
++			ret = aipu_alloc_dma_iova_phy(&aipu->mm, &buf_req, filp);
++			if (!ret)
++				ret = copy_buf_request_to_v0((void __user *)arg, &buf_req);
++		} else {
++			ret = -EINVAL;
++		}
++		break;
++	case AIPU_IOCTL_FREE_BUF_V0:
++		if (!copy_buf_desc_from_v0(&desc, (void __user *)arg))
++			ret = aipu_free_dma_iova_phy(&aipu->mm, &desc, filp);
++		else
++			ret = -EINVAL;
++		break;
++	case AIPU_IOCTL_SCHEDULE_JOB_V0:
++		if (!copy_job_desc_from_v0(&user_job, (void __user *)arg)) {
++			user_job.asid0_base = manager->asid0_base;
++			ret = aipu_job_manager_scheduler(manager, &user_job, filp);
++		} else {
++			ret = -EINVAL;
++		}
++		break;
+ 	case AIPU_IOCTL_QUERY_CAP:
+ 		ret = aipu_priv_query_capability(aipu, &cap);
+ 		if (!ret && copy_to_user((struct aipu_cap __user *)arg, &cap, sizeof(cap)))
+diff --git a/driver/armchina-npu/include/armchina_aipu.h b/driver/armchina-npu/include/armchina_aipu.h
+index c14b81d..541a1e6 100755
+--- a/driver/armchina-npu/include/armchina_aipu.h
++++ b/driver/armchina-npu/include/armchina_aipu.h
+@@ -146,7 +146,8 @@ struct aipu_partition_cap {
+ struct aipu_cap {
+ 	__u32 partition_cnt;
+ 	__u32 asid_cnt;
+-	__u64 asid_base[4];
++	/* Legacy UMD ABI: widened so QUERY_CAP matches the size old UMDs send. */
++	__u64 asid_base[32];
+ 	__u32 is_homogeneous;
+ 	__u64 dtcm_base;
+ 	__u32 dtcm_size;

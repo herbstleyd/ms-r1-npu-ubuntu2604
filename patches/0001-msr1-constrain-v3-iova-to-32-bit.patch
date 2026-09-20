@@ -1,0 +1,69 @@
+diff --git a/driver/armchina-npu/aipu_mm.c b/driver/armchina-npu/aipu_mm.c
+index c7b2cbb..d04dfd4 100755
+--- a/driver/armchina-npu/aipu_mm.c
++++ b/driver/armchina-npu/aipu_mm.c
+@@ -25,6 +25,24 @@
+ #include "aipu_dma_buf.h"
+ #include "v2.h"
+ 
++#include <linux/moduleparam.h>
++
++/*
++ * MS-R1 / CIX P1 (ZHOUYI V3): the NPU's address bus only carries 32 bits.
++ * The generic path below first requests a 35-bit IOVA window
++ * (bus_dma_limit = 0x800000000), which makes the IOMMU hand out IOVAs at
++ * 0x700000000. The NPU silently truncates those, and every access faults in
++ * the SMMU. Constrain the window to 32 bits instead.
++ *
++ *   force_dma32 = -1 : auto - constrain on ZHOUYI V3 only (default)
++ *   force_dma32 =  0 : never constrain (upstream behaviour)
++ *   force_dma32 =  1 : always constrain
++ */
++static int force_dma32 = -1;
++module_param(force_dma32, int, 0444);
++MODULE_PARM_DESC(force_dma32,
++		 "Constrain NPU IOVA window to 32 bits: -1=auto (ZHOUYI V3), 0=off, 1=on");
++
+ /*
+  * DEBUG: V3 custom-IOVA lifecycle tracing (DPTSW-23453 SMMU event 0x10).
+  * The V3_IOVA_DEBUG toggle and the v3dbg() macro now live in aipu_mm.h so
+@@ -1408,6 +1426,7 @@ static __maybe_unused int aipu_mm_add_iova_region(struct aipu_memory_manager *mm
+ 	unsigned long iova_region_size = 0xc0000000;
+ 	int asid_idx = 0;
+ 	int region_idx = 0;
++	bool dma32;
+ 
+ 	if (!mm)
+ 		return -EINVAL;
+@@ -1415,12 +1434,28 @@ static __maybe_unused int aipu_mm_add_iova_region(struct aipu_memory_manager *mm
+ 	if (mm->version == AIPU_ISA_VERSION_ZHOUYI_V3_2)
+ 		iova_region_size = 0xe0000000;
+ 
++	dma32 = (force_dma32 > 0) ||
++		(force_dma32 < 0 && mm->version == AIPU_ISA_VERSION_ZHOUYI_V3);
++
++	if (dma32) {
++		iova_region_size = 0x3ffff000;
+ #if (KERNEL_VERSION(5, 5, 0) <= LINUX_VERSION_CODE)
+-	mm->dev->bus_dma_limit = 0x800000000;
++		mm->dev->bus_dma_limit = 0xc0000000;
+ #elif (KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE)
+-	mm->dev->bus_dma_mask = 0x800000000;
++		mm->dev->bus_dma_mask = 0xc0000000;
+ #endif
+-	mm->dma_mask = 35;
++		mm->dma_mask = 32;
++		dev_info(mm->dev,
++			 "IOVA window constrained to 32 bits (force_dma32=%d)\n",
++			 force_dma32);
++	} else {
++#if (KERNEL_VERSION(5, 5, 0) <= LINUX_VERSION_CODE)
++		mm->dev->bus_dma_limit = 0x800000000;
++#elif (KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE)
++		mm->dev->bus_dma_mask = 0x800000000;
++#endif
++		mm->dma_mask = 35;
++	}
+ 
+ 	if (aipu_mm_reserved_iova_for_never_map(mm, IOVA_ALLOC)) {
+ 		dev_err(mm->dev, "fail to reserve iova region for never map.");
